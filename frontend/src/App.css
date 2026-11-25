@@ -101,6 +101,16 @@ input, select { width: 100%; min-height: 42px; padding: 8px 11px; border: 1px so
 .button.danger { margin-top: 14px; background: var(--white); border-color: var(--red); color: var(--red); }
 .button.danger:hover { background: #fdecea; }
 .button-link { border: 0; background: none; color: var(--red); text-decoration: underline; padding: 4px; }
+.button-link.edit { color: var(--forest-700); }
+.row-actions { white-space: nowrap; }
+.row-actions .button-link + .button-link { margin-left: 8px; }
+.form-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.form-actions .button { flex: 1; }
+.form-actions .button.secondary { margin-top: 0; }
+.button.outline { background: var(--white); color: var(--forest-700); }
+.button.outline:hover:not(:disabled) { background: var(--forest-100); }
+.status-slot:empty { display: none; }
+.load-error { flex-wrap: wrap; align-items: center; justify-content: space-between; }
 
 .message { margin-top: 10px; font-size: 0.88rem; font-weight: 600; }
 .message:empty { margin: 0; }

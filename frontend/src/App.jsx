@@ -1,6 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  initialSuppliers,
+  checkApiHealth,
+  getSuppliers,
+  createSupplier,
+  updateSupplier,
+  deleteSupplier,
+  resetSuppliers,
+} from './api.js'
+import {
   materialFactors,
   transportFactors,
   materials,
@@ -191,7 +198,7 @@ function EmissionsChart() {
   )
 }
 
-function SupplierTable({ suppliers, onDelete }) {
+function SupplierTable({ suppliers, onEdit, onDelete, disabled }) {
   if (suppliers.length === 0) return <p className="empty">No suppliers found.</p>
   return (
     <div className="table-wrap">
@@ -211,8 +218,9 @@ function SupplierTable({ suppliers, onDelete }) {
               <td>{s.documents}</td>
               <td><Badge level={s.risk} /></td>
               {onDelete && (
-                <td>
-                  <button className="button-link" onClick={() => onDelete(s)} aria-label={`Delete ${s.name}`}>Delete</button>
+                <td className="row-actions">
+                  <button className="button-link edit" disabled={disabled} onClick={() => onEdit(s)} aria-label={`Edit ${s.name}`}>Edit</button>
+                  <button className="button-link" disabled={disabled} onClick={() => onDelete(s)} aria-label={`Delete ${s.name}`}>Delete</button>
                 </td>
               )}
             </tr>
@@ -223,9 +231,25 @@ function SupplierTable({ suppliers, onDelete }) {
   )
 }
 
+// Shown while supplier data is loading, or if it could not be loaded.
+function SupplierStatus({ load, onRetry }) {
+  if (load.status === 'loading') {
+    return <div className="notice" role="status"><p>Loading suppliers from the backend...</p></div>
+  }
+  if (load.status === 'error') {
+    return (
+      <div className="notice load-error" role="alert">
+        <p>Supplier data is unavailable. {load.error}</p>
+        <button className="button" onClick={onRetry}>Try again</button>
+      </div>
+    )
+  }
+  return null
+}
+
 /* ---------- Pages ---------- */
 
-function Overview({ suppliers, goTo }) {
+function Overview({ suppliers, ready, goTo }) {
   const risk = countBy(suppliers, 'risk')
   const latest = monthlyEmissions[monthlyEmissions.length - 1]
   const previous = monthlyEmissions[monthlyEmissions.length - 2]
@@ -235,9 +259,9 @@ function Overview({ suppliers, goTo }) {
   return (
     <>
       <div className="stat-grid">
-        <Stat icon="users" label="Total suppliers" value={suppliers.length} hint="In your demo list" />
-        <Stat icon="alert" label="High-risk suppliers" value={risk.High || 0} hint="Manually assigned status" />
-        <Stat icon="shield" label="Countries" value={new Set(suppliers.map((s) => s.country.toLowerCase())).size} hint="Sourcing locations" />
+        <Stat icon="users" label="Total suppliers" value={ready ? suppliers.length : '—'} hint="In your demo list" />
+        <Stat icon="alert" label="High-risk suppliers" value={ready ? risk.High || 0 : '—'} hint="Manually assigned status" />
+        <Stat icon="shield" label="Countries" value={ready ? new Set(suppliers.map((s) => s.country.toLowerCase())).size : '—'} hint="Sourcing locations" />
         <Stat icon="leaf" label={`Emissions, ${latest.month} (tCO2e)`} value={formatNumber(latestTotal)} hint={`${change}% vs ${previous.month} · illustrative`} />
       </div>
 
@@ -246,15 +270,19 @@ function Overview({ suppliers, goTo }) {
           <EmissionsChart />
         </Card>
         <Card title="Supplier risk mix">
-          <BarList
-            total={suppliers.length || 1}
-            items={RISK_LEVELS.map((level) => ({ label: `${level} risk`, value: risk[level] || 0, tone: level.toLowerCase() }))}
-          />
+          {ready ? (
+            <BarList
+              total={suppliers.length || 1}
+              items={RISK_LEVELS.map((level) => ({ label: `${level} risk`, value: risk[level] || 0, tone: level.toLowerCase() }))}
+            />
+          ) : (
+            <p className="empty">Supplier data not loaded.</p>
+          )}
         </Card>
       </div>
 
       <Card title="Recently added suppliers">
-        <SupplierTable suppliers={suppliers.slice(-5).reverse()} />
+        {ready ? <SupplierTable suppliers={suppliers.slice(-5).reverse()} /> : <p className="empty">Supplier data not loaded.</p>}
         <button className="button secondary" onClick={() => goTo('suppliers')}>View all suppliers</button>
       </Card>
     </>
@@ -263,41 +291,84 @@ function Overview({ suppliers, goTo }) {
 
 const EMPTY_FORM = { name: '', country: '', material: '', risk: '', documents: '' }
 
-function Suppliers({ suppliers, setSuppliers }) {
+function Suppliers({ suppliers, load, onRefresh, onAdd, onUpdate, onDelete }) {
   const [form, setForm] = useState(EMPTY_FORM)
+  const [editing, setEditing] = useState(null) // The supplier being edited, or null.
+  const [busy, setBusy] = useState(false) // True while waiting for the backend.
   const [message, setMessage] = useState({ type: '', text: '' })
   const [search, setSearch] = useState('')
   const [riskFilter, setRiskFilter] = useState('All')
+  const nameInput = useRef(null)
+
+  const ready = load.status === 'ready'
+  const locked = busy || !ready
 
   const update = (event) => setForm({ ...form, [event.target.name]: event.target.value })
 
-  function addSupplier(event) {
+  function stopEditing() {
+    setEditing(null)
+    setForm(EMPTY_FORM)
+  }
+
+  function startEditing(supplier) {
+    const { name, country, material, risk, documents } = supplier
+    setEditing(supplier)
+    setForm({ name, country, material, risk, documents })
+    setMessage({ type: '', text: '' })
+    nameInput.current.focus() // Also scrolls the form into view.
+  }
+
+  async function saveSupplier(event) {
     event.preventDefault()
-    const name = form.name.trim()
-    const country = form.country.trim()
-    if (!name || !country || !form.material || !form.risk || !form.documents) {
+    if (locked) return
+    const details = { ...form, name: form.name.trim(), country: form.country.trim() }
+    if (Object.values(details).some((value) => !value)) {
       setMessage({ type: 'error', text: 'Please fill in every field.' })
       return
     }
-    const isDuplicate = suppliers.some(
-      (s) => s.name.toLowerCase() === name.toLowerCase() && s.country.toLowerCase() === country.toLowerCase(),
-    )
-    if (isDuplicate) {
-      setMessage({ type: 'error', text: 'This supplier is already in the list.' })
-      return
+
+    setBusy(true)
+    setMessage({ type: '', text: '' })
+    try {
+      if (editing) {
+        await onUpdate(editing.id, details)
+      } else {
+        await onAdd(details)
+      }
+      setMessage({ type: 'success', text: `${details.name} was ${editing ? 'updated' : 'added'}.` })
+      stopEditing()
+      setSearch('')
+      setRiskFilter('All')
+    } catch (error) {
+      // The form keeps what you typed, so you can correct it and try again.
+      if (editing && error.status === 404) stopEditing()
+      setMessage({ type: 'error', text: error.message })
+    } finally {
+      setBusy(false)
     }
-    setSuppliers([...suppliers, { ...form, name, country, id: Date.now() }])
-    setForm(EMPTY_FORM)
-    setSearch('')
-    setRiskFilter('All')
-    setMessage({ type: 'success', text: `${name} was added.` })
   }
 
-  function deleteSupplier(supplier) {
-    if (window.confirm(`Delete ${supplier.name}?`)) {
-      setSuppliers(suppliers.filter((s) => s.id !== supplier.id))
+  async function removeSupplier(supplier) {
+    if (!window.confirm(`Delete ${supplier.name}?`)) return
+
+    setBusy(true)
+    setMessage({ type: '', text: '' })
+    try {
+      await onDelete(supplier.id)
+      if (editing?.id === supplier.id) stopEditing()
       setMessage({ type: 'success', text: `${supplier.name} was deleted.` })
+    } catch (error) {
+      if (editing?.id === supplier.id && error.status === 404) stopEditing()
+      setMessage({ type: 'error', text: error.message })
+    } finally {
+      setBusy(false)
     }
+  }
+
+  function refresh() {
+    stopEditing()
+    setMessage({ type: '', text: '' })
+    onRefresh()
   }
 
   const text = search.trim().toLowerCase()
@@ -309,10 +380,13 @@ function Suppliers({ suppliers, setSuppliers }) {
 
   return (
     <>
-      <Card title="Add supplier" note="Saved only in this browser. Do not enter confidential information.">
-        <form className="form-grid" onSubmit={addSupplier} noValidate>
+      <Card
+        title={editing ? 'Edit supplier' : 'Add supplier'}
+        note="Stored in the backend's memory and reset when the backend restarts. Do not enter confidential information."
+      >
+        <form className="form-grid" onSubmit={saveSupplier} noValidate>
           <label>Supplier name
-            <input name="name" value={form.name} onChange={update} maxLength="80" placeholder="e.g. Demo Supplier" />
+            <input ref={nameInput} name="name" value={form.name} onChange={update} maxLength="80" placeholder="e.g. Demo Supplier" />
           </label>
           <label>Country
             <input name="country" value={form.country} onChange={update} maxLength="60" placeholder="e.g. Portugal" />
@@ -335,20 +409,34 @@ function Suppliers({ suppliers, setSuppliers }) {
               <option>Complete</option><option>Partial</option><option>Missing</option>
             </select>
           </label>
-          <button className="button" type="submit">Add supplier</button>
+          <div className="form-actions">
+            <button className="button" type="submit" disabled={locked}>
+              {busy ? 'Please wait...' : editing ? 'Save changes' : 'Add supplier'}
+            </button>
+            {editing && (
+              <button className="button secondary" type="button" disabled={busy} onClick={() => { stopEditing(); setMessage({ type: '', text: '' }) }}>
+                Cancel
+              </button>
+            )}
+          </div>
         </form>
         <p className={`message ${message.type}`} role="status">{message.text}</p>
       </Card>
 
-      <Card title={`Suppliers (${visible.length} of ${suppliers.length})`}>
+      <Card title={ready ? `Suppliers (${visible.length} of ${suppliers.length})` : 'Suppliers'}>
         <div className="toolbar">
           <input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, country or material" aria-label="Search suppliers" />
           <select value={riskFilter} onChange={(e) => setRiskFilter(e.target.value)} aria-label="Filter by risk">
             <option value="All">All risk levels</option>
             {RISK_LEVELS.map((r) => <option key={r} value={r}>{r} risk</option>)}
           </select>
+          <button className="button outline" type="button" disabled={busy || load.status === 'loading'} onClick={refresh}>Refresh list</button>
         </div>
-        <SupplierTable suppliers={visible} onDelete={deleteSupplier} />
+        {ready ? (
+          <SupplierTable suppliers={visible} onEdit={startEditing} onDelete={removeSupplier} disabled={busy} />
+        ) : (
+          <p className="empty">Supplier data not loaded.</p>
+        )}
       </Card>
     </>
   )
@@ -471,7 +559,7 @@ function matchingSuppliers(rule, suppliers) {
   return suppliers.filter((s) => rule.materials.includes(s.material))
 }
 
-function Compliance({ suppliers }) {
+function Compliance({ suppliers, ready }) {
   const [region, setRegion] = useState('All')
   const visible = regulations.filter((r) => region === 'All' || r.region === region)
 
@@ -501,7 +589,8 @@ function Compliance({ suppliers }) {
               <p className="match small">
                 {rule.materials === 'ALL' && 'Could be relevant to any material. Depends on origin, destination and supply chain.'}
                 {rule.materials === 'COMPANY' && 'Scope depends on company size, not only on materials.'}
-                {Array.isArray(rule.materials) &&
+                {Array.isArray(rule.materials) && !ready && 'Supplier matching is unavailable until supplier data loads.'}
+                {Array.isArray(rule.materials) && ready &&
                   (matches.length
                     ? `Material name match to review: ${matches.map((s) => s.name).join(', ')}`
                     : 'No material name matches in your supplier list. This does not rule the law out.')}
@@ -604,7 +693,7 @@ function Recommendations({ suppliers }) {
   )
 }
 
-function Reports({ suppliers, calculations, settings }) {
+function Reports({ suppliers, ready, calculations, settings }) {
   const today = new Date().toLocaleDateString('en-CA') // YYYY-MM-DD
   const header = (title) => [
     [title],
@@ -619,6 +708,7 @@ function Reports({ suppliers, calculations, settings }) {
       title: 'Supplier risk report',
       description: 'Supplier, country, material, document status and risk status.',
       count: suppliers.length,
+      unavailable: !ready,
       file: 'suppliers',
       rows: () => [
         ...header('Eco-Logic Supplier Risk Report'),
@@ -655,11 +745,11 @@ function Reports({ suppliers, calculations, settings }) {
       {reports.map((r) => (
         <Card key={r.file} title={r.title}>
           <p>{r.description}</p>
-          <p className="muted small">{r.count} data rows</p>
-          <button className="button" disabled={r.count === 0} onClick={() => downloadCSV(`eco-logic-${r.file}-demo-${today}.csv`, r.rows())}>
+          <p className="muted small">{r.unavailable ? 'Supplier data not loaded' : `${r.count} data rows`}</p>
+          <button className="button" disabled={r.unavailable || r.count === 0} onClick={() => downloadCSV(`eco-logic-${r.file}-demo-${today}.csv`, r.rows())}>
             <Icon name="download" /> Download CSV
           </button>
-          {r.count === 0 && <p className="muted small">Use the carbon calculator first.</p>}
+          {r.file === 'carbon' && r.count === 0 && <p className="muted small">Use the carbon calculator first.</p>}
         </Card>
       ))}
     </div>
@@ -669,20 +759,33 @@ function Reports({ suppliers, calculations, settings }) {
 function Settings({ settings, setSettings, resetData }) {
   const [draft, setDraft] = useState(settings)
   const [message, setMessage] = useState('')
+  const [resetFailed, setResetFailed] = useState(false)
+  const [resetting, setResetting] = useState(false)
 
   function save(event) {
     event.preventDefault()
     const cleaned = { ...draft, company: draft.company.trim() || DEFAULT_SETTINGS.company }
     setDraft(cleaned)
     setSettings(cleaned)
+    setResetFailed(false)
     setMessage('Settings saved.')
   }
 
-  function reset() {
-    if (window.confirm('Reset suppliers, calculations and settings to the original demo data?')) {
-      resetData()
+  async function reset() {
+    if (!window.confirm('Reset suppliers, calculations and settings to the original demo data?')) return
+
+    setResetting(true)
+    setResetFailed(false)
+    setMessage('')
+    try {
+      await resetData()
       setDraft(DEFAULT_SETTINGS)
       setMessage('Demo data restored.')
+    } catch (error) {
+      setResetFailed(true)
+      setMessage(`Reset was not confirmed. Calculations and settings were not changed. ${error.message}`)
+    } finally {
+      setResetting(false)
     }
   }
 
@@ -700,11 +803,11 @@ function Settings({ settings, setSettings, resetData }) {
           </label>
           <button className="button" type="submit">Save settings</button>
         </form>
-        <p className="message success" role="status">{message}</p>
+        <p className={`message ${resetFailed ? 'error' : 'success'}`} role="status">{message}</p>
       </Card>
       <Card title="Demo data">
-        <p>This prototype has no backend or login. Your changes are saved only in this browser.</p>
-        <button className="button danger" onClick={reset}>Reset demo data</button>
+        <p>Suppliers are kept in the backend's memory and reset when the backend restarts. Calculations and settings are saved in this browser. This prototype has no login or database.</p>
+        <button className="button danger" disabled={resetting} onClick={reset}>{resetting ? 'Resetting...' : 'Reset demo data'}</button>
       </Card>
     </div>
   )
@@ -715,10 +818,31 @@ function Settings({ settings, setSettings, resetData }) {
 export default function App() {
   const [page, setPage] = useState(getPageFromAddress)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [suppliers, setSuppliers] = useSavedState('ecologic-suppliers', initialSuppliers, Array.isArray)
+  const [apiStatus, setApiStatus] = useState('Checking...')
+  // Suppliers now come from the backend, so they are no longer saved in the browser.
+  const [suppliers, setSuppliers] = useState([])
+  const [supplierLoad, setSupplierLoad] = useState({ status: 'loading', error: '' })
   const [calculations, setCalculations] = useSavedState('ecologic-calculations', [], Array.isArray)
   const [settings, setSettings] = useSavedState('ecologic-settings', DEFAULT_SETTINGS, (v) => Boolean(v?.company && v?.transport))
+useEffect(() => {
+    let active = true
 
+    checkApiHealth()
+      .then((data) => {
+        if (active && data.success) {
+          setApiStatus('Connected')
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setApiStatus('Offline')
+        }
+      })
+
+    return () => {
+      active = false
+    }
+  }, [])
   useEffect(() => {
     const onAddressChange = () => {
       setPage(getPageFromAddress())
@@ -729,25 +853,98 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onAddressChange)
   }, [])
 
+  const loadSuppliers = useCallback(async () => {
+    setSupplierLoad({ status: 'loading', error: '' })
+    try {
+      setSuppliers(await getSuppliers())
+      setSupplierLoad({ status: 'ready', error: '' })
+      setApiStatus('Connected')
+    } catch (error) {
+      setSuppliers([])
+      setSupplierLoad({ status: 'error', error: error.message })
+      if (error.status === 0) setApiStatus('Offline')
+    }
+  }, [])
+
+  // Load the suppliers once when the app opens.
+  useEffect(() => {
+    loadSuppliers()
+  }, [loadSuppliers])
+
+  // Handles a failed change, then passes the error on so the page can show it.
+  function handleChangeError(error) {
+    if (error.status === 0) setApiStatus('Offline')
+    // 404 means our list is out of date (for example, after a backend restart).
+    if (error.status === 404) loadSuppliers()
+    throw error
+  }
+
+  // The screen is only updated after the backend confirms each change.
+  async function addSupplier(details) {
+    try {
+      const created = await createSupplier(details)
+      setSuppliers((current) => [...current, created])
+      setApiStatus('Connected')
+    } catch (error) {
+      handleChangeError(error)
+    }
+  }
+
+  async function editSupplier(id, details) {
+    try {
+      const updated = await updateSupplier(id, details)
+      setSuppliers((current) => current.map((s) => (s.id === id ? updated : s)))
+      setApiStatus('Connected')
+    } catch (error) {
+      handleChangeError(error)
+    }
+  }
+
+  async function removeSupplier(id) {
+    try {
+      await deleteSupplier(id)
+      setSuppliers((current) => current.filter((s) => s.id !== id))
+      setApiStatus('Connected')
+    } catch (error) {
+      handleChangeError(error)
+    }
+  }
+
   const goTo = (id) => {
     window.location.hash = id
     setMenuOpen(false)
   }
 
-  const resetData = () => {
-    setSuppliers(initialSuppliers)
+  const resetData = async () => {
+    // Reset the backend first. If this fails, nothing below runs.
+    setSuppliers(await resetSuppliers())
+    setSupplierLoad({ status: 'ready', error: '' })
+    setApiStatus('Connected')
     setCalculations([])
     setSettings(DEFAULT_SETTINGS)
   }
 
+  const suppliersReady = supplierLoad.status === 'ready'
+  const supplierPages = ['overview', 'suppliers', 'compliance', 'risk', 'recommendations', 'reports']
+
   const screens = {
-    overview: <Overview suppliers={suppliers} goTo={goTo} />,
-    suppliers: <Suppliers suppliers={suppliers} setSuppliers={setSuppliers} />,
+    overview: <Overview suppliers={suppliers} ready={suppliersReady} goTo={goTo} />,
+    suppliers: (
+      <Suppliers
+        suppliers={suppliers}
+        load={supplierLoad}
+        onRefresh={loadSuppliers}
+        onAdd={addSupplier}
+        onUpdate={editSupplier}
+        onDelete={removeSupplier}
+      />
+    ),
     carbon: <Carbon settings={settings} calculations={calculations} setCalculations={setCalculations} />,
-    compliance: <Compliance suppliers={suppliers} />,
-    risk: <Risk suppliers={suppliers} />,
-    recommendations: <Recommendations suppliers={suppliers} />,
-    reports: <Reports suppliers={suppliers} calculations={calculations} settings={settings} />,
+    compliance: <Compliance suppliers={suppliers} ready={suppliersReady} />,
+    // These two pages are built entirely from supplier data, so they wait for it.
+    risk: suppliersReady && <Risk suppliers={suppliers} />,
+    recommendations: suppliersReady && <Recommendations suppliers={suppliers} />,
+    reports: <Reports suppliers={suppliers} ready={suppliersReady} calculations={calculations} settings={settings} />,
     settings: <Settings settings={settings} setSettings={setSettings} resetData={resetData} />,
   }
 
@@ -779,14 +976,20 @@ export default function App() {
           <div className="topbar-title">
             <h1>{title}</h1>
             <p className="muted small">{settings.company}</p>
-          </div>
+          </div>  
+          <span className="demo-pill">Backend: {apiStatus}</span>
           <span className="demo-pill">Demonstration data</span>
         </header>
         {/* The key gives each page a fresh start when you switch pages. */}
-        <main key={page}>{screens[page]}</main>
+        <main key={page}>
+          {/* This wrapper stays in place so the page below keeps its form contents. */}
+          <div className="status-slot">
+            {supplierPages.includes(page) && <SupplierStatus load={supplierLoad} onRetry={loadSuppliers} />}
+          </div>
+          {screens[page]}
+        </main>
         <footer className="muted small">Eco-Logic · Frontend prototype for demonstration purposes only</footer>
       </div>
     </div>
   )
 }
-
