@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+    import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   checkApiHealth,
   getSuppliers,
@@ -382,7 +382,7 @@ function Suppliers({ suppliers, load, onRefresh, onAdd, onUpdate, onDelete }) {
     <>
       <Card
         title={editing ? 'Edit supplier' : 'Add supplier'}
-        note="Stored in the backend's memory and reset when the backend restarts. Do not enter confidential information."
+        note="Saved in the app's SQLite database. Do not enter confidential information."
       >
         <form className="form-grid" onSubmit={saveSupplier} noValidate>
           <label>Supplier name
@@ -806,7 +806,7 @@ function Settings({ settings, setSettings, resetData }) {
         <p className={`message ${resetFailed ? 'error' : 'success'}`} role="status">{message}</p>
       </Card>
       <Card title="Demo data">
-        <p>Suppliers are kept in the backend's memory and reset when the backend restarts. Calculations and settings are saved in this browser. This prototype has no login or database.</p>
+        <p>Suppliers are saved in a SQLite database. Calculations and settings are saved in this browser. Reset replaces your supplier changes with the demo list. This prototype has no login.</p>
         <button className="button danger" disabled={resetting} onClick={reset}>{resetting ? 'Resetting...' : 'Reset demo data'}</button>
       </Card>
     </div>
@@ -874,7 +874,7 @@ useEffect(() => {
   // Handles a failed change, then passes the error on so the page can show it.
   function handleChangeError(error) {
     if (error.status === 0) setApiStatus('Offline')
-    // 404 means our list is out of date (for example, after a backend restart).
+    // 404 means our list is out of date (the supplier was removed or the data was reset elsewhere).
     if (error.status === 404) loadSuppliers()
     throw error
   }
@@ -993,3 +993,5 @@ useEffect(() => {
     </div>
   )
 }
+
+    

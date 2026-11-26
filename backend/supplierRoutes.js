@@ -1,6 +1,6 @@
 const express = require("express");
 const { randomUUID } = require("crypto");
-const { demoSuppliers } = require("./suppliersData");
+const database = require("./database");
 
 const router = express.Router();
 
@@ -11,13 +11,7 @@ const ALLOWED_VALUES = {
   documents: ["Complete", "Partial", "Missing"],
 };
 const MAX_LENGTH = { name: 80, country: 60 };
-const MAX_SUPPLIERS = 500; // Stops the in-memory list from growing without limit.
-
-// Makes a separate copy, so changing the list never changes the originals.
-const copyDemoSuppliers = () => demoSuppliers.map((supplier) => ({ ...supplier }));
-
-// IN-MEMORY STORAGE: this list is lost whenever the server stops or restarts.
-let suppliers = copyDemoSuppliers();
+const MAX_SUPPLIERS = 500; // Stops the supplier list from growing without limit.
 
 // Checks the data sent by the user. Returns the cleaned data and any errors.
 function validateSupplier(body) {
@@ -48,7 +42,7 @@ function validateSupplier(body) {
 
 // Two suppliers are duplicates if both name and country match (ignoring capitals).
 function isDuplicate(candidate, ignoreId) {
-  return suppliers.some(
+  return database.getAllSuppliers().some(
     (s) =>
       s.id !== ignoreId &&
       s.name.toLowerCase() === candidate.name.toLowerCase() &&
@@ -56,16 +50,13 @@ function isDuplicate(candidate, ignoreId) {
   );
 }
 
-// IDs in the web address are always text, so compare both as text.
-const findIndexById = (id) => suppliers.findIndex((s) => String(s.id) === id);
-
 function sendError(res, status, message, errors) {
   return res.status(status).json({ success: false, message, errors });
 }
 
 // GET /api/suppliers : retrieve all suppliers
 router.get("/", (req, res) => {
-  res.json({ success: true, data: suppliers });
+  res.json({ success: true, data: database.getAllSuppliers() });
 });
 
 // POST /api/suppliers/reset : restore the eight demo suppliers
@@ -73,8 +64,8 @@ router.post("/reset", (req, res) => {
   if (req.body?.confirm !== true) {
     return sendError(res, 400, 'To reset, send JSON: { "confirm": true }');
   }
-  suppliers = copyDemoSuppliers();
-  res.json({ success: true, data: suppliers });
+  database.resetSuppliers();
+  res.json({ success: true, data: database.getAllSuppliers() });
 });
 
 // POST /api/suppliers : add a supplier
@@ -87,20 +78,20 @@ router.post("/", (req, res) => {
   if (isDuplicate(supplier)) {
     return sendError(res, 409, "This supplier is already in the list.");
   }
-  if (suppliers.length >= MAX_SUPPLIERS) {
+  if (database.getAllSuppliers().length >= MAX_SUPPLIERS) {
     return sendError(res, 409, "The demo supplier list is full.");
   }
 
   // A random ID is never reused, even after the server restarts.
   const newSupplier = { id: randomUUID(), ...supplier };
-  suppliers.push(newSupplier);
+  database.insertSupplier(newSupplier);
   res.status(201).json({ success: true, data: newSupplier });
 });
 
 // PUT /api/suppliers/:id : replace a supplier's details (all fields required)
 router.put("/:id", (req, res) => {
-  const index = findIndexById(req.params.id);
-  if (index === -1) {
+  const existing = database.findSupplierById(req.params.id);
+  if (!existing) {
     return sendError(res, 404, "Supplier not found.");
   }
 
@@ -108,22 +99,22 @@ router.put("/:id", (req, res) => {
   if (errors.length) {
     return sendError(res, 400, "Please check the supplier details.", errors);
   }
-  if (isDuplicate(supplier, suppliers[index].id)) {
+  if (isDuplicate(supplier, existing.id)) {
     return sendError(res, 409, "Another supplier already has this name and country.");
   }
 
-  suppliers[index] = { id: suppliers[index].id, ...supplier };
-  res.json({ success: true, data: suppliers[index] });
+  const updated = database.updateSupplier(existing.id, supplier);
+  res.json({ success: true, data: updated });
 });
 
 // DELETE /api/suppliers/:id : remove a supplier
 router.delete("/:id", (req, res) => {
-  const index = findIndexById(req.params.id);
-  if (index === -1) {
+  const removed = database.findSupplierById(req.params.id);
+  if (!removed) {
     return sendError(res, 404, "Supplier not found.");
   }
 
-  const [removed] = suppliers.splice(index, 1);
+  database.deleteSupplier(removed.id);
   res.json({ success: true, data: removed });
 });
 
